@@ -86,9 +86,56 @@ python .\sanitize_file.py `
 | IP_ADDRESS | `[IP_ADDRESS]` |
 | JWT | `[JWT]` |
 | BEARER_TOKEN | `Bearer [BEARER_TOKEN]` |
-| API_KEY / PASSWORD / SECRET / TOKEN | `<key>= [API_KEY]` 等（保留 key 與分隔符） |
+| API_KEY | `<key>: [API_KEY]` |
+| PASSWORD | `<key>: [PASSWORD]` |
+| SECRET | `<key>: [SECRET]` |
+| TOKEN | `<key>: [TOKEN]` |
 | BANK_ACCOUNT_HINT | `[BANK_ACCOUNT]` |
 | TAIWAN_ADDRESS_HINT | `[ADDRESS]` |
+
+### API_KEY / PASSWORD / SECRET / TOKEN 的中文與口語寫法支援
+
+四類 credential 規則同時涵蓋中英文 keyword、半形與全形分隔符，以及對話常見的「keyword 空白 value」寫法。
+
+**Keyword（不分大小寫）**
+
+- API_KEY：`API金鑰`、`API金钥`、`API密鑰`、`API密钥`、`api_key`、`api-key`、`apikey`
+- PASSWORD：`密碼`、`密码`、`通行碼`、`通行码`、`登入密碼`、`登入密码`、`帳密`、`账密`、`password`、`passwd`、`pwd`
+- SECRET：`機密金鑰`、`金鑰`、`金钥`、`密鑰`、`密钥`、`secret`
+- TOKEN：`權杖`、`权杖`、`令牌`、`存取權杖`、`access_token`、`access-token`、`token`
+
+**分隔符**
+
+- 顯式：`=`、`:`、全形 `：`、中文「是」、「為」、「为」
+- 純空白：可接受，但 value 必須至少含 1 個數字（避免誤抓「密碼很重要」這類句子）
+
+**會脫敏的範例**
+
+```
+密碼：abc123           →  密碼: [PASSWORD]
+密碼是 SuperSecret!    →  密碼: [PASSWORD]
+登入密碼 abc123        →  登入密碼: [PASSWORD]
+帳密：user123          →  帳密: [PASSWORD]
+pwd是 abc456           →  pwd: [PASSWORD]
+password abc123        →  password: [PASSWORD]
+金鑰: abc-def-123      →  金鑰: [SECRET]
+權杖：tok_abc123       →  權杖: [TOKEN]
+API金鑰: sk-12345678   →  API金鑰: [API_KEY]
+```
+
+**不會誤抓的範例**
+
+```
+密碼很重要               (無數字 value)
+新密碼設定流程           (無分隔符與 value)
+我覺得這個 password feature 很好
+密碼 是什麼              (value 沒數字)
+```
+
+**仍會漏抓的情境**（要靠 `--llm-model`）
+
+- 對話只貼 value 沒講 keyword：例如 `A: 密碼？` `B: abc123` — 第二行單獨看無法判定
+- value 全是字母無數字且只用空白分隔：例如 `密碼 helloworld` — 故意設計成這樣以避免誤抓
 
 ## 輸出檔案
 
