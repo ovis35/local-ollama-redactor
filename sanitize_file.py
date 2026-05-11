@@ -1,7 +1,12 @@
 """local-ollama-redactor CLI 入口。
 
-流程：regex → A 模型 (redactor) → 二次 regex → B 模型 (reviewer) → 寫出。
-任何階段失敗 → 寫 sanitize_error.json，不寫正式 sanitized 檔。
+流程：
+1. Regex 第一層脫敏（必跑、deterministic）
+2. (可選) 本地 Ollama LLM 旁路審查 — 掃過 regex 結果，找出規則以外的疑似機敏並套用
+3. 寫出 sanitized 檔 + report
+
+設計：regex 是骨幹、LLM 是旁路。LLM 失敗只會在 report 留 warning，不影響 sanitized 檔產出。
+只有讀檔 / regex / 寫檔等 deterministic 階段失敗才會中止並寫 error report。
 """
 from __future__ import annotations
 
@@ -16,9 +21,8 @@ from ollama_client import (
     assert_model_exists,
     check_ollama_available,
 )
-from redactor import run_redactor
+from redactor import run_llm_check
 from report import build_error_report, build_success_report, write_json_report
-from reviewer import run_reviewer_with_retries
 from rules import apply_regex_redactions
 
 ALLOWED_SUFFIXES = {".txt", ".md"}
@@ -28,34 +32,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="sanitize_file.py",
         description=(
-            "本地 Ollama 雙模型文件脫敏工具。"
-            "Regex → redactor (A 模型) → reviewer (B 模型)，"
-            "B 模型 pass 才輸出正式 sanitized 檔。"
+            "本地文件脫敏工具。Regex 第一層必跑、輸出永遠是 deterministic 結果；"
+            "若指定 --llm-model，則額外用本地 Ollama 模型快速掃過 regex 結果，"
+            "找出規則以外的疑似機敏並套用。LLM 是旁路、可選；失敗只發 warning。"
         ),
     )
     parser.add_argument("--input", required=True, help="輸入檔案 (.txt 或 .md)")
     parser.add_argument(
-        "--redactor-model",
-        required=True,
-        help="A 模型 (語意脫敏) 名稱，例如 qwen3:14b",
-    )
-    parser.add_argument(
-        "--reviewer-model",
-        required=True,
-        help="B 模型 (脫敏稽核) 名稱，例如 gpt-oss:20b",
+        "--llm-model",
+        default=None,
+        help=(
+            "可選：本地 Ollama 模型名稱 (e.g. qwen3:14b)。"
+            "提供時會在 regex 後跑一輪 LLM 旁路審查。未提供則只跑 regex。"
+        ),
     )
     parser.add_argument("--output", default=None, help="輸出檔案路徑 (可選)")
     parser.add_argument(
-        "--max-review-fixes",
-        type=int,
-        default=2,
-        help="reviewer fail 時自動套用 required_fixes 的最大重試次數 (預設 2)",
-    )
-    parser.add_argument(
         "--chunk-size",
         type=int,
-        default=3000,
-        help="送進模型的分段大小 (預設 3000 字元)",
+        default=8000,
+        help="LLM 旁路審查的分段大小 (預設 8000 字元)；只在啟用 LLM 時有意義",
     )
     parser.add_argument(
         "--ollama-url",
@@ -67,6 +63,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=900,
         help="單次 Ollama 呼叫的 timeout 秒數 (預設 900)",
+    )
+    parser.add_argument(
+        "--strict-llm",
+        action="store_true",
+        help=(
+            "嚴格模式：若 LLM 階段失敗（連線、模型不存在、JSON 解析等）則整體失敗、"
+            "不寫 sanitized 檔。預設為非嚴格 — LLM 失敗只在 report 留 warning。"
+        ),
     )
     return parser.parse_args(argv)
 
@@ -101,16 +105,8 @@ def _resolve_paths(
     return input_path, output_path, report_path, error_path
 
 
-def _merge_counts(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
-    keys = set(a) | set(b)
-    return {k: a.get(k, 0) + b.get(k, 0) for k in sorted(keys)}
-
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
-
-    redactor_model = args.redactor_model
-    reviewer_model = args.reviewer_model
 
     # ---- 路徑解析 ----
     try:
@@ -118,15 +114,12 @@ def main(argv: list[str] | None = None) -> int:
             args.input, args.output
         )
     except (FileNotFoundError, ValueError) as exc:
-        # 路徑/副檔名問題 — 沒有 input_path 可以放 error 檔，直接印 stderr
         print(f"[ERROR] {exc}", file=sys.stderr)
         return 1
 
     def _fail(stage: str, reason: str, details: dict[str, Any] | None = None) -> int:
         err = build_error_report(
             source_file=input_path,
-            redactor_model=redactor_model,
-            reviewer_model=reviewer_model,
             failed_stage=stage,
             reason=reason,
             details=details,
@@ -142,90 +135,52 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[FAILED] error report: {error_path}", file=sys.stderr)
         return 1
 
-    # ---- Ollama 強制檢查 ----
-    try:
-        check_ollama_available(args.ollama_url)
-        assert_model_exists(args.ollama_url, redactor_model)
-        assert_model_exists(args.ollama_url, reviewer_model)
-    except OllamaError as exc:
-        return _fail("ollama_check", str(exc))
-
     # ---- 讀檔 ----
     try:
         source_text = input_path.read_text(encoding="utf-8")
     except OSError as exc:
         return _fail("read_input", f"讀檔失敗：{exc}")
 
-    # ---- Regex 第一層 ----
+    # ---- Regex 第一層 (必跑) ----
     try:
-        first_pass, regex_counts_1 = apply_regex_redactions(source_text)
+        regex_text, regex_counts = apply_regex_redactions(source_text)
     except Exception as exc:  # noqa: BLE001
         return _fail(
             "regex_redaction",
-            f"第一層 regex 失敗：{exc}",
+            f"regex 失敗：{exc}",
             {"trace": traceback.format_exc()},
         )
 
-    # ---- A 模型 redactor ----
-    try:
-        after_redactor, redactor_stats = run_redactor(
-            first_pass,
-            model=redactor_model,
-            url=args.ollama_url,
-            chunk_size=args.chunk_size,
-            timeout=args.ollama_timeout,
-        )
-    except OllamaError as exc:
-        return _fail("redactor_review", str(exc))
-    except Exception as exc:  # noqa: BLE001
-        return _fail(
-            "redactor_review",
-            f"redactor 流程異常：{exc}",
-            {"trace": traceback.format_exc()},
-        )
+    final_text = regex_text
+    llm_stats: dict[str, Any] | None = None
+    llm_warning: str | None = None
 
-    # ---- Regex 第二層 ----
-    try:
-        candidate, regex_counts_2 = apply_regex_redactions(after_redactor)
-    except Exception as exc:  # noqa: BLE001
-        return _fail(
-            "regex_redaction",
-            f"第二層 regex 失敗：{exc}",
-            {"trace": traceback.format_exc()},
-        )
-
-    regex_counts = _merge_counts(regex_counts_1, regex_counts_2)
-
-    # ---- B 模型 reviewer ----
-    try:
-        final_text, review, rounds = run_reviewer_with_retries(
-            source=source_text,
-            candidate=candidate,
-            model=reviewer_model,
-            url=args.ollama_url,
-            chunk_size=args.chunk_size,
-            max_fixes=args.max_review_fixes,
-            timeout=args.ollama_timeout,
-        )
-    except OllamaError as exc:
-        return _fail("final_review", str(exc))
-    except Exception as exc:  # noqa: BLE001
-        return _fail(
-            "final_review",
-            f"reviewer 流程異常：{exc}",
-            {"trace": traceback.format_exc()},
-        )
-
-    if review.get("verdict") != "pass":
-        return _fail(
-            "final_review",
-            f"reviewer 經 {rounds} 輪審查仍 fail",
-            {
-                "rounds": rounds,
-                "review": review,
-                "regex_redactions": regex_counts,
-            },
-        )
+    # ---- LLM 旁路審查 (可選) ----
+    if args.llm_model:
+        try:
+            check_ollama_available(args.ollama_url)
+            assert_model_exists(args.ollama_url, args.llm_model)
+            final_text, llm_stats = run_llm_check(
+                regex_text,
+                model=args.llm_model,
+                url=args.ollama_url,
+                chunk_size=args.chunk_size,
+                timeout=args.ollama_timeout,
+            )
+        except OllamaError as exc:
+            if args.strict_llm:
+                return _fail("llm_check", str(exc))
+            llm_warning = f"LLM 旁路審查失敗，輸出僅含 regex 結果：{exc}"
+            print(f"[WARN] {llm_warning}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            if args.strict_llm:
+                return _fail(
+                    "llm_check",
+                    f"LLM 旁路審查異常：{exc}",
+                    {"trace": traceback.format_exc()},
+                )
+            llm_warning = f"LLM 旁路審查異常，輸出僅含 regex 結果：{exc}"
+            print(f"[WARN] {llm_warning}", file=sys.stderr)
 
     # ---- 寫出 sanitized + report ----
     try:
@@ -236,12 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     success = build_success_report(
         source_file=input_path,
         output_file=output_path,
-        redactor_model=redactor_model,
-        reviewer_model=reviewer_model,
         regex_redactions=regex_counts,
-        redactor_stats=redactor_stats,
-        reviewer_review=review,
-        rounds=rounds,
+        llm_check=llm_stats,
+        llm_warning=llm_warning,
     )
     try:
         write_json_report(report_path, success)
@@ -253,6 +205,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[OK] sanitized → {output_path}")
     print(f"[OK] report    → {report_path}")
+    if llm_warning:
+        print(f"[OK] (LLM warning recorded in report)")
     return 0
 
 

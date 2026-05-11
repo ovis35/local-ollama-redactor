@@ -1,19 +1,19 @@
 # local-ollama-redactor
 
-Windows 本地端文件脫敏 CLI。讀取 `.txt` / `.md`，依序執行：
+Windows 本地端文件脫敏 CLI。讀取 `.txt` / `.md`，以 **Regex 為骨幹**做 deterministic 脫敏，
+並可**選擇性**啟用本地 Ollama 模型快速旁路審查，找出 regex 規則以外的疑似機敏。
 
-1. **Regex 第一層** — deterministic 高確定性脫敏（email / 電話 / 身分證 / API key / token / JWT / 信用卡 / 銀行帳號 / 地址 …）
-2. **A 模型 (redactor)** — 強制呼叫本地 Ollama 模型做語意敏感資訊審查並套用替換
-3. **Regex 第二層** — 對 A 模型結果再做一次 deterministic 檢查
-4. **B 模型 (reviewer)** — 強制呼叫本地 Ollama 模型，比對「原始檔」vs「候選脫敏檔」，判定是否仍有敏感資訊或過度改寫
-5. **僅當 B 模型 verdict = pass 時**，才寫出正式 `.sanitized.md` + `sanitize_report.json`
-6. 任何階段失敗 → 只寫 `sanitize_error.json`，**絕不**輸出正式 sanitized 檔
+## 設計原則
 
-完全在本機執行，不呼叫任何雲端 API、不傳檔案出本機。
+- **Regex 為主**：永遠跑、輸出永遠 deterministic、永遠寫得出 sanitized 檔。
+- **LLM 為輔**：可選旁路。提供 `--llm-model` 才會跑；任務只是「快速瀏覽 regex 結果，找規則外的疑似機敏」並套用替換。
+- **失敗策略**：
+  - Regex / 讀檔 / 寫檔失敗 → 中止、寫 `sanitize_error.json`、不寫 sanitized。
+  - LLM 失敗（Ollama 連不上、模型不存在、JSON 解析失敗等）→ 預設只 warning + 寫出 regex 結果；加 `--strict-llm` 才會升級為失敗。
+- **不覆蓋原檔**：output 不能與 input 同路徑。
+- **完全本地**：只與 `http://localhost:11434` 通訊，不向任何外部服務送出檔案內容。
 
 ## 安裝
-
-需要 Python 3.11+ 與本地 [Ollama](https://ollama.com/) 服務。
 
 ```powershell
 python -m venv .venv
@@ -21,143 +21,127 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 確認 Ollama 已啟動
+需要 Python 3.11+。LLM 旁路審查需要本地 [Ollama](https://ollama.com/) 服務。
 
 ```powershell
-# 服務應監聽 http://localhost:11434
+# 確認 Ollama 服務
 curl http://localhost:11434/api/tags
-
-# 列出本地模型
 ollama list
-```
 
-若清單裡沒有你想用的模型，先 `ollama pull <model>`，例如：
-
-```powershell
+# 沒有想用的模型先 pull
 ollama pull qwen3:14b
-ollama pull gpt-oss:20b
+ollama pull gemma3:4b
 ```
 
-## 使用方式
+## 使用
 
-最小範例：
+### 純 Regex（最快、最穩）
+
+```powershell
+python .\sanitize_file.py --input ".\samples\sample.md"
+```
+
+### 加上 LLM 旁路審查
+
+```powershell
+python .\sanitize_file.py --input ".\samples\sample.md" --llm-model "qwen3:14b"
+```
+
+### 嚴格模式：LLM 失敗就整體失敗
+
+```powershell
+python .\sanitize_file.py --input ".\samples\sample.md" --llm-model "qwen3:14b" --strict-llm
+```
+
+### 大檔案 + 自訂 chunk / timeout
 
 ```powershell
 python .\sanitize_file.py `
-  --input ".\samples\sample.md" `
-  --redactor-model "qwen3:14b" `
-  --reviewer-model "gpt-oss:20b"
+  --input "D:\Brain\logs\big.md" `
+  --llm-model "gemma3:4b" `
+  --chunk-size 8000 `
+  --ollama-timeout 1800
 ```
 
-指定 output 路徑：
+## CLI 參數
 
-```powershell
-python .\sanitize_file.py `
-  --input ".\note.md" `
-  --output ".\note.sanitized.md" `
-  --redactor-model "qwen3:14b" `
-  --reviewer-model "gpt-oss:20b"
-```
+| 參數 | 必填 | 預設 | 說明 |
+| --- | :---: | --- | --- |
+| `--input` | ✅ | — | 輸入檔，必須是 `.txt` 或 `.md` |
+| `--llm-model` |   | `None` | 本地 Ollama 模型名稱；給了才跑 LLM 旁路審查 |
+| `--output` |   | `<stem>.sanitized<ext>` | 輸出檔；不得與 input 相同 |
+| `--chunk-size` |   | `8000` | LLM 分段大小（字元） |
+| `--ollama-url` |   | `http://localhost:11434` | 本地 Ollama URL |
+| `--ollama-timeout` |   | `900` | 單次 Ollama 呼叫 timeout 秒數 |
+| `--strict-llm` |   | off | 開啟後 LLM 失敗整體失敗、不寫 sanitized |
 
-調整 reviewer 自動修補的最大重試次數：
+## Regex 規則（rules.py）
 
-```powershell
-python .\sanitize_file.py `
-  --input "D:\Brain\logs\test.md" `
-  --redactor-model "qwen3:14b" `
-  --reviewer-model "gpt-oss:20b" `
-  --max-review-fixes 2
-```
-
-### 必填參數
-
-| 參數 | 說明 |
+| 類型 | 替換 |
 | --- | --- |
-| `--input` | 輸入檔，必須是 `.txt` 或 `.md` |
-| `--redactor-model` | A 模型 (語意脫敏) 名稱 |
-| `--reviewer-model` | B 模型 (脫敏稽核) 名稱 |
-
-### 選填參數
-
-| 參數 | 預設 | 說明 |
-| --- | --- | --- |
-| `--output` | `<stem>.sanitized<ext>` | 輸出檔；不得與 input 相同 |
-| `--max-review-fixes` | `2` | reviewer fail 時自動套用 `required_fixes` 重試的最大次數 |
-| `--chunk-size` | `3000` | 送進模型的字元分段大小 |
-| `--ollama-url` | `http://localhost:11434` | 本地 Ollama URL |
-| `--ollama-timeout` | `900` | 單次 Ollama 呼叫的 timeout 秒數；thinking 模型 (e.g. gpt-oss) 冷載 + 推理較慢時可調高 |
+| EMAIL | `[EMAIL]` |
+| TAIWAN_PHONE | `[PHONE]` |
+| TAIWAN_ID | `[TAIWAN_ID]` |
+| CREDIT_CARD | `[CREDIT_CARD]` |
+| IP_ADDRESS | `[IP_ADDRESS]` |
+| JWT | `[JWT]` |
+| BEARER_TOKEN | `Bearer [BEARER_TOKEN]` |
+| API_KEY / PASSWORD / SECRET / TOKEN | `<key>= [API_KEY]` 等（保留 key 與分隔符） |
+| BANK_ACCOUNT_HINT | `[BANK_ACCOUNT]` |
+| TAIWAN_ADDRESS_HINT | `[ADDRESS]` |
 
 ## 輸出檔案
 
-對於 `note.md`，工具會產生：
+對 `note.md`：
 
-- `note.sanitized.md` — 正式脫敏結果（僅 B 模型 pass 才會產生）
+- `note.sanitized.md` — sanitized 結果（regex 永遠寫得出；LLM 啟用時包含 LLM 套用結果）
 - `note.sanitize_report.json` — 成功報告
 - `note.sanitize_error.json` — 失敗報告（成功時不會產生）
 
-## 成功輸出範例
-
-`note.sanitize_report.json`：
+## 成功 report 範例
 
 ```json
 {
   "status": "success",
-  "source_file": "D:\\Brain\\logs\\note.md",
-  "output_file": "D:\\Brain\\logs\\note.sanitized.md",
-  "redactor_model": "qwen3:14b",
-  "reviewer_model": "gpt-oss:20b",
+  "source_file": "...\\note.md",
+  "output_file": "...\\note.sanitized.md",
   "regex_redactions": {
     "EMAIL": 1,
     "TAIWAN_PHONE": 1,
     "TAIWAN_ID": 1,
     "API_KEY": 1
   },
-  "redactor_review": {
+  "llm_check": {
     "chunks": 1,
-    "items_found": 3,
-    "items_applied": 3
+    "items_found": 2,
+    "items_applied": 2,
+    "overall_risk": "medium",
+    "items": [
+      {
+        "chunk": 1,
+        "type": "person",
+        "exact_text": "王小明",
+        "replacement": "[姓名]",
+        "reason": "個人姓名"
+      }
+    ]
   },
-  "final_review": {
-    "verdict": "pass",
-    "rounds": 1,
-    "risk_level": "low",
-    "remaining_sensitive_items": [],
-    "over_redaction_issues": [],
-    "structure_issues": []
-  }
+  "llm_warning": null
 }
 ```
 
-## 失敗輸出範例
+`llm_check` 為 `null` 表示沒啟用 LLM；`llm_warning` 非 null 表示 LLM 失敗、輸出僅包含 regex 結果。
 
-`note.sanitize_error.json`：
+## 失敗 report 範例
 
 ```json
 {
   "status": "failed",
-  "source_file": "D:\\Brain\\logs\\note.md",
-  "failed_stage": "ollama_check",
-  "reason": "無法連線到 Ollama (http://localhost:11434): ...",
-  "redactor_model": "qwen3:14b",
-  "reviewer_model": "gpt-oss:20b",
+  "source_file": "...\\note.md",
+  "failed_stage": "regex_redaction",
+  "reason": "...",
   "details": {}
 }
 ```
 
-`failed_stage` 可能值：
-
-- `ollama_check` — Ollama 未啟動或模型不存在
-- `read_input` — 讀檔失敗
-- `regex_redaction` — Regex 脫敏例外
-- `redactor_review` — A 模型呼叫失敗或回傳非 JSON
-- `final_review` — B 模型呼叫失敗、回傳非 JSON、或重試後仍 fail
-- `write_output` — 寫出檔案失敗
-
-## 設計原則
-
-- **不覆蓋原檔**：output 與 input 同路徑會直接報錯。
-- **Ollama 強制**：沒有 `--no-llm`，沒有讓模型變可選的旁路；Ollama 不可用就直接失敗。
-- **雙模型審查**：redactor 找出敏感片段並替換；reviewer 比對原始 vs 候選，把關殘留與過度脫敏。
-- **失敗不產生正式 sanitized 檔**：只要任何階段失敗（含 reviewer 重試後仍 fail），只寫 `sanitize_error.json`。
-- **完全本地**：僅與 `http://localhost:11434` 通訊，不向任何外部服務送出檔案內容。
-- **JSON 嚴格**：模型回傳必須是合法 JSON，否則整批失敗；JSON 前後若混入雜訊會嘗試擷取第一個平衡的 `{...}` 區塊。
+`failed_stage` 可能值：`read_input` / `regex_redaction` / `llm_check`（僅 `--strict-llm`）/ `write_output`。

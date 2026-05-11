@@ -40,15 +40,15 @@ PATTERNS: dict[str, tuple[Pattern[str], str]] = {
         r"\1\2 [API_KEY]",
     ),
     "PASSWORD": (
-        re.compile(r"(?i)\b(password|passwd|pwd)\s*([:=])\s*(\S+)"),
+        re.compile(r"(?i)\b(password|passwd|pwd)\s*([:=])\s*([A-Za-z0-9._\-!@#$%^&*+]+)"),
         r"\1\2 [PASSWORD]",
     ),
     "SECRET": (
-        re.compile(r"(?i)\b(secret)\s*([:=])\s*(\S+)"),
+        re.compile(r"(?i)\b(secret)\s*([:=])\s*([A-Za-z0-9._\-!@#$%^&*+]+)"),
         r"\1\2 [SECRET]",
     ),
     "TOKEN": (
-        re.compile(r"(?i)\b(token)\s*([:=])\s*(\S+)"),
+        re.compile(r"(?i)\b(token)\s*([:=])\s*([A-Za-z0-9._\-!@#$%^&*+]+)"),
         r"\1\2 [TOKEN]",
     ),
     # 銀行帳號提示：行庫名稱或關鍵字附近的長數字串

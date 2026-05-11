@@ -14,3 +14,13 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# 使用者輸入的原始文件 (含敏感資訊) 絕不入庫
+*.txt
+*.md
+!README.md
+!samples/sample.md
+
+# 誤跑進 worktree 的其他專案副本
+Desktop/
+
