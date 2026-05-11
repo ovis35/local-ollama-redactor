@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import traceback
 from pathlib import Path
@@ -133,6 +134,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(f"[FAILED] stage={stage} reason={reason}", file=sys.stderr)
         print(f"[FAILED] error report: {error_path}", file=sys.stderr)
+        print("---ERROR REPORT---", file=sys.stderr)
+        print(json.dumps(err, ensure_ascii=False, indent=2), file=sys.stderr)
         return 1
 
     # ---- 讀檔 ----
@@ -207,6 +210,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[OK] report    → {report_path}")
     if llm_warning:
         print(f"[OK] (LLM warning recorded in report)")
+    print("---REPORT---")
+    print(json.dumps(success, ensure_ascii=False, indent=2))
     return 0
 
 
