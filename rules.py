@@ -36,20 +36,38 @@ PATTERNS: dict[str, tuple[Pattern[str], str]] = {
     ),
     # key-value 風格的 secrets：保留 key 與分隔符，只替換 value
     "API_KEY": (
-        re.compile(r"(?i)\b(api[_-]?key)\s*([:=])\s*([A-Za-z0-9._\-]+)"),
-        r"\1\2 [API_KEY]",
+        re.compile(
+            r"(?i)(API\s*金鑰|API\s*金钥|API\s*密鑰|API\s*密钥|api[_-]?key)"
+            r"\s*[:=：是為为]\s*"
+            r"([A-Za-z0-9._\-]{6,})"
+        ),
+        r"\1: [API_KEY]",
     ),
+    # 中英文 keyword + (顯式分隔符 OR 空白+含數字 value) + value
+    # 分隔符：= : ： 是 為 为；或純空白但 value 必須含至少一個數字（避免「密碼很重要」誤抓）
     "PASSWORD": (
-        re.compile(r"(?i)\b(password|passwd|pwd)\s*([:=])\s*([A-Za-z0-9._\-!@#$%^&*+]+)"),
-        r"\1\2 [PASSWORD]",
+        re.compile(
+            r"(?i)(密碼|密码|通行碼|通行码|登入密碼|登入密码|帳密|账密|password|passwd|pwd)"
+            r"(?:\s*[:=：是為为]\s*|\s+(?=[A-Za-z0-9._\-!@#$%^&*+]*\d))"
+            r"([A-Za-z0-9._\-!@#$%^&*+]{3,})"
+        ),
+        r"\1: [PASSWORD]",
     ),
     "SECRET": (
-        re.compile(r"(?i)\b(secret)\s*([:=])\s*([A-Za-z0-9._\-!@#$%^&*+]+)"),
-        r"\1\2 [SECRET]",
+        re.compile(
+            r"(?i)(機密金鑰|机密金钥|金鑰|金钥|密鑰|密钥|secret)"
+            r"(?:\s*[:=：是為为]\s*|\s+(?=[A-Za-z0-9._\-!@#$%^&*+]*\d))"
+            r"([A-Za-z0-9._\-!@#$%^&*+]{3,})"
+        ),
+        r"\1: [SECRET]",
     ),
     "TOKEN": (
-        re.compile(r"(?i)\b(token)\s*([:=])\s*([A-Za-z0-9._\-!@#$%^&*+]+)"),
-        r"\1\2 [TOKEN]",
+        re.compile(
+            r"(?i)(權杖|权杖|令牌|存取權杖|存取权杖|access[_-]?token|token)"
+            r"(?:\s*[:=：是為为]\s*|\s+(?=[A-Za-z0-9._\-!@#$%^&*+]*\d))"
+            r"([A-Za-z0-9._\-!@#$%^&*+]{3,})"
+        ),
+        r"\1: [TOKEN]",
     ),
     # 銀行帳號提示：行庫名稱或關鍵字附近的長數字串
     "BANK_ACCOUNT_HINT": (
